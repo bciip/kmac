@@ -1,0 +1,161 @@
+// Copyright lowRISC contributors.
+// Licensed under the Apache License, Version 2.0, see LICENSE for details.
+// SPDX-License-Identifier: Apache-2.0
+{
+  name: kmac_base
+  import_testplans: ["hw/dv/tools/dvsim/testplans/csr_testplan.hjson",
+                     "hw/dv/tools/dvsim/testplans/intr_test_testplan.hjson",
+                     "hw/dv/tools/dvsim/testplans/mem_testplan.hjson",
+                     // Uncomment stress tests once ready to prevent seeing failures every night.
+                     //"hw/dv/tools/dvsim/testplans/stress_all_with_reset_testplan.hjson",
+                     "hw/dv/tools/dvsim/testplans/tl_device_access_types_testplan.hjson"]
+  testpoints: [
+    {
+      name: smoke
+      desc: '''
+            KMAC smoke test will contain a number of rounds, and acts as a base for many other tests.
+            In each round, we run a full KMAC hashing operation:
+              - Randomly enable interrupts, operation mode (SHA3/SHAKE/CSHAKE/KMAC), key length (if
+                applicable), constraining all settings to be legal.
+              - Set function name to "KMAC" and set customization string as empty if applicable.
+              - Randomly set endianness of input msg and internal keccak state.
+              - Randomly provide a sideloaded key, do not set cfg.sideload.
+              - Set output length between 1-`keccak_rate` bytes if applicable.
+              - Randomly select either SW or EDN as the source of entropy
+              - Trigger KMAC to start absorbing input message.
+                - During absorption stage randomly read from STATE window, expect 0.
+              - Write message to MSG_FIFO window, maximum length of 32 bytes.
+              - Check SHA3 engine status.
+              - Trigger KMAC to finish absorbing stage, check kmac_done is set and status.squeeze is
+                set.
+              - Read output digest, and compare against output from reference C++ model.
+                - In masked configuration: both shares are XORed to get unmasked result digest.
+                - In unmasked configuration: Share1 is the result digest, Share2 should be 0.
+              - Signal cmd.done to tell KMAC to clear internal state.
+              - Try reading output digest again, confirm that it is 0.
+
+              This test, and all other tests in the testplan, will be checked for correctness
+              in two different ways:
+              - first, a DPI-C model is used to check that the correct digest value is produced
+              - a cycle-accurate model is implemented in the scoreboard to provide constant checks
+                during each hash operation and ensure that internal state is being updated
+                correctly
+            '''
+      milestone: V1
+      tests: ["{name}_smoke"]
+    }
+    {
+      name: long_msg_and_output
+      desc: '''
+            Same as the smoke test, except with a message of up to 100KB.
+            Max firmware input size for KMAX is around 392KB, but this is too large for a DV
+            simulation.
+            Average input size from firmware would be around 60-100KB, so we use 100KB as a max
+            input size for DV, but will enable easy extensibility for emulation testing where we can
+            enable much larger messages.
+            Allow output length to vary up to 1KB (for XOF functions).
+            If output length is greater than `keccak_rate` bytes, keccak rounds will be run manually to
+            squeeze extra output data.
+            Set function name as "KMAC" and enable full randomization of customization string (if
+            applicable).
+            '''
+      milestone: V2
+      tests: ["{name}_long_msg_and_output"]
+    }
+    {
+      name: burst_write
+      desc: '''
+            This is the same as the long_message test, except we burst-write chunks of the message
+            into the msg_fifo, and disable intermediate status/CSR checks.
+            '''
+      milestone: V2
+      tests: ["{name}_burst_write"]
+    }
+    {
+      name: test_vectors
+      desc: '''
+            These tests drive NIST test vectors for SHA3/SHAKE/KMAC into the design and check
+            the output against the expected digest values.
+            '''
+      milestone: V2
+      tests: ["{name}_test_vectors_sha3_224", "{name}_test_vectors_sha3_256",
+              "{name}_test_vectors_sha3_384", "{name}_test_vectors_sha3_512",
+              "{name}_test_vectors_shake_128", "{name}_test_vectors_shake_256",
+              "{name}_test_vectors_kmac", "{name}_test_vectors_kmac_xof"]
+    }
+    {
+      name: sideload
+      desc: '''
+            Same as the smoke test, except we set cfg.sideload and provide a
+            valid sideloaded key as well as a valid SW-provided key.
+            KMAC should operate on the sideloaded key.
+            '''
+      milestone: V2
+      tests: ["{name}_sideload"]
+    }
+    {
+      name: app
+      desc: '''
+            Test that the Keymgr/ROM/LC can all initiate a KMAC operation through
+            the application interface - Keymgr uses KMAC hash, while ROM/LC use CShake.
+            Use an array of kmac_app_agents to send message data to the KMAC and to control
+            the hashing logic, and set cfg.sideload if the Keymgr is enabled.
+            The result digest sent to the kmac_app_agent will be compared against the result from
+            the DPI reference model.
+            In addition, read from the STATE window afterwards and confirm that this access is
+            blocked and will return 0.
+            '''
+      milestone: V2
+      tests: ["{name}_app"]
+    }
+    {
+      name: error
+      desc: '''
+            Try several error sequences:
+
+            - Update key/prefix/config during absorption/process/squeeze stage.
+            - Write msg to msg_fifo during process/squeeze stage
+            - When in KMAC mode, set the function name to not "KMAC"
+            - Incorrect SHA3 control flow:
+              - Issue Process/Run/Done cmds before issuing Start
+              - Issue Run/Done before issuing Process
+              - Issue Start after issuing Process
+              - If squeezing data, issue Start/Process after issuing Run
+            - Incorrect KMAC configurations (e.g. set KMAC strength as 512).
+            - Provide software inputs during operation of the application interface
+
+            // TODO: Not all of these errors have been supported yet, and more errors might be
+            //       added later.
+            //       So this might be split into several error tests later on.
+            '''
+      milestone: V2
+      tests: ["{name}_error"]
+    }
+    {
+      name: entropy_timers
+      desc: ''' Test entropy interface for KMAC.
+
+            This test randomly chooses to execute either a SW-controlled hash or a hash
+            from the App interface.
+            All configuration fields are left as is, but now we set both of the internal timer CSRs:
+            - the entropy_timer value is the number of cycles that KMAC will wait before
+              sending a new request to EDN for more entropy
+            - the wait_timer value is the number of cycles that KMAC will wait for an EDN response
+              before raising an error
+
+            This will be checked in the scoreboard using the cycle acurate model.
+            '''
+      milestone: V2
+      tests: ["{name}_entropy"]
+    }
+    {
+      name: throughput
+      desc: '''
+            Measure the throughput of the various hashing calculations and make sure they correspond
+            to the expected throughput range for the design.
+            '''
+      milestone: V3
+      tests: ["{name}_throughput"]
+    }
+  ]
+}
